@@ -1,0 +1,590 @@
+---
+title: "Email Marketing Project"
+output: html_document
+date: "2022-11-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message = FALSE)
+```
+
+## Load Libraries
+
+```{r message = FALSE}
+#install.packages('dplyr')
+library(dplyr)
+
+#install.packages('caTools')
+library(caTools)
+
+#install.packages('caret')
+library(caret)
+
+#install.packages('pROC')
+library(pROC)
+
+#install.packages('CustomerScoringMetrics')
+library(CustomerScoringMetrics)
+
+#install.packages('randomForest')
+library(randomForest)
+
+#install.packages('tree')
+library(tree)
+
+#install.packages('maptree')
+library(maptree)
+
+#install.packages('ROSE')
+library(ROSE)
+
+#install.packages('MASS')
+library(MASS)
+
+#install.packages('xgboost')
+library(xgboost)
+
+#install.packages('splitstackshape')
+library(splitstackshape)
+
+#install.packages('e1071')
+library(e1071)
+
+#install.packages('FSelector')
+library('FSelector')
+
+#install.packages('tune')
+library('tune')
+
+#install.packages('tidymodels')
+library(tidymodels)
+
+#install.packages("Hmisc")
+library(Hmisc)
+
+#install.packages("corrplot")
+library(corrplot)
+
+#install.packages("boot")
+library(boot)
+
+```
+
+# Data Pre-processing
+
+## Read CSV Data
+
+```{r}
+# Import the data
+data.raw <- read.csv('assignment_data.csv')
+
+# Check the summary of raw data
+summary(data.raw)
+```
+
+## Data Cleaning
+
+```{r}
+# Copying into new table
+marketing.data <- data.raw
+
+# Remove "Customer_ID" as it provides no information for the target variable
+marketing.data$Customer_ID <- NULL
+
+# Remove "purchase_segment" as it provides same information with "purchase" variable
+marketing.data$purchase_segment <- NULL
+
+# Remove "account" as it only provides one type information for all target variable
+marketing.data$account <- NULL
+```
+
+```{r}
+# Factorize target column and all categorical variables
+marketing.data$visit <- as.factor(marketing.data$visit)
+marketing.data$delivery <- factor(marketing.data$delivery, levels = c(1,2,3), labels = c("Home", "Work", "Multiple"))
+marketing.data$marriage <- factor(marketing.data$marriage, levels = c(0,1,2), labels = c("Others", "Married", "Single"))
+marketing.data$email_segment <- factor(marketing.data$email_segment, levels = c("Mens E-Mail","No E-Mail","Womens E-Mail"), labels = c("Mens", "No", "Womens"))
+marketing.data$zip_area <- as.factor(marketing.data$zip_area)
+marketing.data$channel <- as.factor(marketing.data$channel)
+```
+
+## Handling Data Missing
+
+```{r}
+# Look for array indices that have NaN values on "spend" column
+na.index.spend <- which(is.na(marketing.data$spend))
+
+# Replacing all occurrences of missing values (NA) within a variable by the median
+for(i in na.index.spend){
+  marketing.data$spend[i] = median(marketing.data$spend, na.rm=TRUE)  
+}
+```
+
+```{r}
+# Check the summary of marketing data
+summary(marketing.data)
+```
+
+## Data Encoding
+
+```{r}
+# Encode all categorical features in the dataset into new columns
+dmy <- dummyVars(" ~ email_segment + marriage + channel + delivery + zip_area", data = marketing.data)
+data.encoded <- data.frame(predict(dmy, newdata = marketing.data))
+
+# Combine the marketing data with encoded columns and delete categorical columns
+marketing.data.encoded <- cbind(marketing.data, data.encoded)
+marketing.data.encoded$email_segment <- NULL
+marketing.data.encoded$marriage <- NULL
+marketing.data.encoded$channel <- NULL
+marketing.data.encoded$delivery <- NULL
+marketing.data.encoded$zip_area <- NULL
+
+# Check the summary of encoded marketing data
+summary(marketing.data.encoded)
+```
+
+## Normalisation on Numeric Data
+
+```{r}
+# Normalize all numeric features with Min-Max Scaling
+process <- preProcess(marketing.data.encoded, method=c("range"))
+marketing.data.normalized <- predict(process, marketing.data.encoded)
+
+# Check the summary of normalized marketing data
+summary(marketing.data.normalized)
+```
+
+## Feature Importance of Initial Data
+
+```{r}
+# Use function information.gain to compute information gain values of the attributes
+# We use non-encoded and non-normalized dataset to check on feature importance
+marketing.data.initial <- marketing.data
+
+weights <- information.gain(visit ~., marketing.data.initial)
+
+# Save a copy of the weights
+features.df <- weights
+
+# Add row names as a column to keep them during ordering
+features.df$attr <- rownames(weights)
+
+# Sort the weights in decreasing order of information gain values
+features.df <- arrange(features.df, -features.df$attr_importance)
+
+# Show result
+features.df
+```
+
+## Identifiying high correlated features to avoid multicollinearity problem
+
+```{r}
+# Copy normalized marketing data into new table
+marketing.data.check.corr <- marketing.data.normalized
+
+# Revert back "visit" column into numeric to run correlation function
+marketing.data.check.corr$visit <- as.numeric(marketing.data.check.corr$visit) - 1
+
+# Run correlation function
+marketing.data.rcorr = cor(marketing.data.check.corr)
+
+# Show correlation coefficient between each variables
+# Insignificant correlations are leaved blank
+corrplot(marketing.data.rcorr, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+```
+We know that "spend" features have relatively strong positive correlation, so we will remove that feature from dataset. 
+
+```{r}
+ # Modify correlation matrix
+marketing.data.rcorr.rm <- marketing.data.rcorr                
+marketing.data.rcorr.rm[upper.tri(marketing.data.rcorr.rm)] <- 0
+diag(marketing.data.rcorr.rm) <- 0
+
+# Remove highly correlated variables
+marketing.data.cleaned <- marketing.data.normalized[ , !apply(marketing.data.rcorr.rm,    
+                           2,
+                           function(x) any(x > 0.8))]
+
+# Check the summary of cleaned marketing data
+summary(marketing.data.cleaned)
+```
+
+## Feature Importance using Final Data
+
+```{r}
+marketing.data.final <- marketing.data
+
+# Remove spend column due to strong positive correlation with target variable
+marketing.data.final$spend <- NULL
+
+# Use function information.gain to compute information gain values of the attributes
+weights.balanced <- information.gain(visit ~., marketing.data.final)
+
+# Let's save a copy of the weights
+features.df.final <- weights.balanced
+
+# add row names as a column to keep them during ordering
+features.df.final$attr <- rownames(weights.balanced)
+
+# Let's sort the weights in decreasing order of information gain values.
+# We will use arrange() function 
+features.df.final <- arrange(features.df.final, -features.df.final$attr_importance)
+
+# Give significant flag into features importance table
+features.df.final <- mutate(features.df.final, significant.flag = ifelse(attr_importance>0.002,TRUE,FALSE))
+
+# Show result
+features.df.final
+```
+
+```{r}
+# Plot the feature importance bar chart
+ggplot(data = features.df.final, aes(x=reorder(attr, (attr_importance)), y=attr_importance, fill = significant.flag)) + geom_col() + labs(y="Importance Scores", x="Features", size=15) +
+  scale_fill_manual(values = c("black","blue")) +
+  coord_flip() +
+  theme(
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size=12, angle=0),
+    # Remove panel border
+    panel.border = element_blank(),  
+    # Remove panel grid lines
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    # Remove panel background
+    panel.background = element_blank(),
+    legend.position = "none",
+    # Add axis line
+    axis.line = element_line(colour = "grey50"))
+```
+
+## Removing Data for Modelling Purpose
+
+We'll need to build to predict visitation based on the impact of sending email to the customer, hence customer who are not given any email should be excluded from training and test dataset.
+
+```{r}
+# Remove no email segment
+marketing.data.transformed <- marketing.data.cleaned %>% filter(email_segment.No != 1)
+
+# Check the summary of final transformed marketing data
+summary(marketing.data.transformed)
+```
+
+## Data Partitioning
+
+```{r}
+# Set seed
+set.seed(123)
+
+split = sample.split(marketing.data.transformed$visit, SplitRatio = 0.8) 
+
+training.data = subset(marketing.data.transformed, split == TRUE) 
+test.data = subset(marketing.data.transformed, split == FALSE)
+
+summary(training.data$visit)
+summary(test.data$visit)
+```
+
+## Over and under sampling to Handle Imbalanced Data
+
+```{r}
+training.data.balanced <- ovun.sample(visit ~ ., data = training.data, method = "both", p = 0.5, seed=123)$data
+
+summary(training.data.balanced$visit)
+summary(test.data$visit)
+```
+
+## 1. Logistic Regression (GLM)
+
+### k-fold Cross Validation and pick the best model
+
+```{r eval = FALSE}
+
+# Set random seed
+set.seed(123)
+
+# Build logreg model and assign it to logreg model
+for (i in 1:10) {
+  LogReg.model <- glm(visit~., data = training.data.balanced, family="binomial")
+  LogReg.model[i] <- cv.glm(training.data.balanced, LogReg.model, K=10)$delta[1]
+}
+```
+
+### Predict test dataset and evaluate model
+
+```{r eval = FALSE}
+# Predict the Test set results 
+visit.predict.logreg <- predict(LogReg.model, test.data, type="response", probability=TRUE)
+
+#logreg class
+visit.class.logreg  <- ifelse(visit.predict.logreg>0.6,1,0)
+visit.class.logreg  <- as.factor(visit.class.logreg )
+
+# Confusion matrix
+confusionMatrix(visit.class.logreg, test.data$visit, positive = "1", mode = "prec_recall")
+```
+
+## 2. XGBoost
+
+```{r  message=FALSE}
+# We create a new  training dataset because XGBoost does not accept factors and charater features
+training.data.balanced_1 <- training.data.balanced
+training.data.balanced_1$visit <- as.integer(training.data.balanced_1$visit) -1
+training.data.balanced_2 <- training.data.balanced
+training.data.balanced_2$visit <- NULL
+
+# Setting Parameters for the XGBoost Model
+parameters <- list(eta = 0.1,
+                   max_depth = 5,
+                   subsample = 0.8,
+                   colsample_bytree = 0.8,
+                   min_child_weight = 1,
+                   gamma = 0,
+                   scale_pos_weight = 2,
+                   eval_metric = "auc",
+                   objective = "binary:logistic",
+                   booster = "gbtree")
+
+# Build the Model
+model_XGB <- xgboost(data = as.matrix(training.data.balanced_2),
+                   label = training.data.balanced_1$visit,
+                   nthread = 6,
+                   nrounds = 800,
+                   params = parameters,
+                   print_every_n = 100,
+                   early_stopping_rounds = 10)
+
+```
+
+```{r}
+test.data_1 <- test.data
+test.data_1$visit <- NULL
+
+# Saving prediction probabilities of XGBoost Model
+prob_XGB <- predict(model_XGB, newdata = as.matrix(test.data_1))
+
+# Setting the threshold of probabilities as 0.85 in the prediction of test_set due to the Imbalance in the test_set$target
+prediction_XGB <- ifelse(prob_XGB > 0.85, 1, 0)
+
+#Creating confusionmatrix in test_set and training_set_smote to check the performance and overfitting
+confusionMatrix(table(prediction_XGB, test.data$visit), positive = "1",mode = "prec_recall")
+```
+
+## 3. SVM
+
+### Hypertuning parameters
+
+```{r}
+# # Set random seed
+# set.seed(123)
+# 
+# # Build SVM model and assign it to SVM model
+# svm.model <- svm(visit~., data = training.data.balanced, kernel = "radial", probability = TRUE, tunecontrol=tune.control(cross=5))
+# 
+# # Predict the Test set results 
+# visit.predict.svm <- predict(svm.model, test.data, probability=TRUE)
+# 
+# # Confusion matrix
+# confusionMatrix(visit.predict.svm, test.data$visit, positive = "1", mode = "prec_recall")
+
+```
+
+```{r}
+# set.seed(123)
+# 
+# training.data.balanced.svm_1 <- training.data.balanced
+# training.data.balanced.svm_1$visit <- NULL
+# 
+# tune_out = tune.svm(x=training.data.balanced.svm_1, y = training.data.balanced$visit, kernel = "radial", probability = TRUE, cost = c(0.1,1,10), gamma = c(0.1, 1, 10))
+# 
+# summary(tune_out)
+```
+
+Result : gamma = 10, cost = 10
+
+### Build and evaluate model
+
+```{r}
+svm.model <- svm(visit~., data = training.data.balanced, kernel = "radial", probability = TRUE, tunecontrol=tune.control(cross=5),
+                 cost = 10,
+                 gamma = 10)
+
+# Predict the Test set results
+visit.predict.svm <- predict(svm.model, test.data, probability=TRUE)
+
+# Confusion matrix
+confusionMatrix(visit.predict.svm, test.data$visit, positive = "1", mode = "prec_recall")
+```
+
+## 4. Decision Tree
+
+```{r}
+
+# Set random seed
+set.seed(123)
+
+# Build Random Forest model and assign it to RF_model
+Dtree.model <- tree(visit ~ ., data =  training.data.balanced, control = tree.control(nrow(training.data.balanced), mindev = 0))
+
+# Predict the Test set results 
+visit.predict.Dtree <- predict(Dtree.model, test.data, type="class")
+
+# Confusion matrix
+confusionMatrix(visit.predict.Dtree, test.data$visit, positive='1', mode = "prec_recall")
+
+```
+
+```{r}
+# Set the seed
+set.seed(123)
+
+# Apply cv.tree function to Dtree
+CVresults = cv.tree(Dtree.model, FUN = prune.misclass, K = 10)
+
+# Let's plot the last 10 values
+#tree_size = tail(CVresults$size, 10)
+#misclassifiations = tail(CVresults$dev, 10)
+#plot(tree_size, misclassifiations/nrow(training.data.balanced), type = "b",
+#     xlab = "Tree Size", ylab = "CV Misclassification Rate")
+
+```
+
+```{r}
+# Prune the tree
+Dtree.model.prune = prune.misclass(Dtree.model, best = 3)
+
+# Let's use this model for prediction
+visit.predict.Dtree.prune <- predict(Dtree.model.prune , test.data, type="class")
+
+# Confusion matrix
+confusionMatrix(visit.predict.Dtree.prune, test.data$visit, positive='1', mode = "prec_recall")
+```
+
+## 5. Random Forest
+
+### Finding best parameters
+
+```{r}
+# HIGH-MEMORY-CONSUMING CHUNK! Don't run it if it's not necessary
+
+# # List of possible values for mtry, nodesize and sampsize
+# mtry_val <- seq(3, 7, 2)
+# nodesize_val <- seq(1, 10, 2)
+# sampsize_val <- floor(nrow(training.data.balanced)*c(0.5, 0.7, 0.8))
+# 
+# # Create a data frame containing all combinations 
+# parametersRF <- expand.grid(mtry = mtry_val, nodesize = nodesize_val, sampsize = sampsize_val)
+# 
+# # Create an empty vector to store error values
+# err <- c()
+# 
+# for (i in 1:nrow(parametersRF)){
+#     # Since random forest model uses random numbers set the seed
+#     set.seed(10)
+#     
+#     # Train a Random Forest model
+#     model <- randomForest(visit~., training.data.balanced,
+#                           mtry = parametersRF$mtry[i],
+#                           nodesize = parametersRF$nodesize[i],
+#                           sampsize = parametersRF$sampsize[i])
+#                           
+#     # Store the error rate for the model     
+#     err[i] <- model$err.rate[nrow(model$err.rate), "OOB"]
+# }
+# 
+# # Identify optimal set of hyperparmeters based on error rate
+# best_comb <- which.min(err)
+# print(parametersRF[best_comb,])
+```
+
+Result : mtry  = 7, nodesize = 1, sampsize = 27380 (0.8).
+
+### Build model and evaluate model prediction
+
+```{r}
+# Set random seed
+set.seed(123)
+
+# Build Random Forest model and assign it to RF_model
+RF.model <- randomForest(visit ~ ., data = training.data.balanced, mtry=7, nodesize=1, sampsize = floor(nrow(training.data.balanced)*0.8))
+
+# Predict the Test set results 
+visit.predict.RF <- predict(RF.model, test.data, type="class")
+
+# Confusion matrix
+confusionMatrix(visit.predict.RF, test.data$visit, positive='1', mode = "prec_recall")
+```
+
+## Calculating ROC and AUC score
+
+```{r}
+
+ROC_LogReg <- roc(test.data$visit, visit.predict.logreg)
+
+ROC_XGB <- roc(test.data$visit, prob_XGB)
+
+prob_svm <- attr(visit.predict.svm, "probabilities")
+ROC_svm <- roc(test.data$visit, prob_svm[,1])
+
+prob_RF <- predict(RF.model, test.data, type = "prob")
+
+ROC_RF <- roc(test.data$visit, prob_RF[, 2])
+
+prob_Dtree <- predict(Dtree.model, test.data, type="vector")
+
+ROC_Dtree <- roc(test.data$visit, prob_Dtree[,2])
+
+prob_Dtree.prune <- predict(Dtree.model.prune, test.data, type="vector")
+
+ROC_Dtree.prune <- roc(test.data$visit, prob_Dtree.prune[,2])
+
+```
+
+```{r}
+auc(ROC_LogReg)
+auc(ROC_XGB)
+auc(ROC_svm)
+#auc(ROC_Dtree)
+auc(ROC_Dtree.prune)
+auc(ROC_RF)
+```
+
+## ROC Curve
+
+```{r}
+
+# Plot the ROC curve for Random Forest and SVM
+ggroc(list(LogisticRegression = ROC_LogReg,XGBoost = ROC_XGB, SVM = ROC_svm, DecisionTree = ROC_Dtree.prune, RandomForest = ROC_RF),
+      legacy.axes=TRUE) + 
+    xlab("FPR") + ylab("TPR") +
+    geom_abline(intercept = 0, slope = 1, # random baseline model
+                color = "darkgrey", linetype = "dashed")
+
+```
+
+## Gain Chart
+
+```{r}
+GainTable_LogReg <- cumGainsTable(visit.predict.logreg, test.data$visit, resolution = 1/100)
+GainTable_XGB <- cumGainsTable(prob_XGB, test.data$visit, resolution = 1/100)
+GainTable_SVM <- cumGainsTable(prob_svm[,2], test.data$visit, resolution = 1/100)
+GainTable_RF <- cumGainsTable(prob_RF[,2], test.data$visit, resolution = 1/100)
+GainTable_Dtree <- cumGainsTable(prob_Dtree[,2], test.data$visit, resolution = 1/100)
+GainTable_Dtree.prune <- cumGainsTable(prob_Dtree.prune[,2], test.data$visit, resolution = 1/100)
+```
+
+```{r}
+plot(GainTable_RF[,4], col="red", type="l",     
+xlab="Percentage of test instances", ylab="Percentage of correct predictions")
+lines(GainTable_LogReg[,4], col="orange", type="l")
+lines(GainTable_XGB[,4], col="green", type="l")
+lines(GainTable_SVM[,4], col="blue", type="l")
+#lines(GainTable_Dtree[,4], col="brown", type="l")
+lines(GainTable_Dtree.prune[,4], col="purple", type="l")
+
+legend("bottomright",
+c("Random Forest", "LogisticRegression (GLM)", "XGBoost", "SVM", "Decision Tree"),
+fill=c("red", "orange","green","blue","purple"))
+```
